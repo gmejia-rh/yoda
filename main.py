@@ -4,12 +4,8 @@ import csv
 import logging
 import warnings
 import multiprocessing as mp
-from googleapiclient.discovery import build
 from urllib.parse import urlparse, parse_qs
 from src.grafana import export_panels, extract_panels, preview_grafana_dashboard
-from src.deplot import image_deplot
-from src.inference import image_inference
-from src.slides import authenticate_google_slides, get_slide_info, replace_images_and_text
 from utils.logging import configure_logging
 from utils.yaml_parser import load_config
 from utils.utils import multi_process, flatten_list
@@ -27,19 +23,14 @@ def cli(max_content_width=120):
 @click.option("--config", default="config/grafana_config.yaml", help="Path to the configuration file")
 @click.option("--debug", is_flag=True, help="log level")
 @click.option("--concurrency", is_flag=True, help="To enable concurrent operations")
-@click.option("--deplot", is_flag=True, help="Flag for deplot")
-@click.option("--inference", is_flag=True, help="Flag for inference")
 @click.option("--csv", default="panel_inference.csv", help=".csv file path to output")
-@click.option("--presentation", default="", help="Presentation id to parse")
-@click.option("--credentials", default="credentials.json", help="Google oauth credentials path")
-@click.option("--slidemapping", default="config/slide_content_mapping.yaml", help="Slide content mapping file")
 def generate(**kwargs):
     """
     sub-command to generate a grafana panels and infer them. Optionally executes the default worklfow to publish those results to a presentation.
     """
     level = logging.DEBUG if kwargs["debug"] else logging.INFO
-    need_deplot = True if kwargs["deplot"] else False
-    need_inference = True if kwargs["inference"] else False
+    need_deplot = False
+    need_inference = False
     if need_deplot and need_inference:
         raise click.UsageError("Cannot use --deplot and --inference together.")
     concurrency = (75 * mp.cpu_count())//100 if kwargs["concurrency"] else 1
@@ -70,47 +61,6 @@ def preview_dashboard(**kwargs):
         d_uid = parsed_d_raw_url.path.split('/')[2]
         d_url = f"{g_url}/api/dashboards/uid/{d_uid}"
         preview_grafana_dashboard(d_url, kwargs["username"], kwargs["password"], True, kwargs["csv"])
-    except Exception as e:
-        logger.error(f"Please make sure the provided credentials are correct. Error: {e}")
-
-@cli.command(name="preview-presentation")
-@click.option("--id", default="", help="Presentation id to preview")
-@click.option("--credentials", default="credentials.json", help="Google oauth credentials path")
-@click.option("--csv", default="", help=".csv file path to output")
-def preview_presentation(**kwargs):
-    """
-    sub-command to preview a presentation. More details here: https://developers.google.com/slides/api/quickstart/python
-    """
-    configure_logging(logging.INFO)
-    global logger
-    logger = logging.getLogger(__name__)
-    try:
-        creds = authenticate_google_slides(kwargs["credentials"])
-        service = build('slides', 'v1', credentials=creds)
-        get_slide_info(service, kwargs["id"], True, kwargs["csv"])
-    except Exception as e:
-        logger.error(f"Please make sure the provided credentials are correct. Error: {e}")
-
-@cli.command(name="update-presentation")
-@click.option("--id", default="", help="Presentation id to preview")
-@click.option("--credentials", default="credentials.json", help="Google oauth credentials path")
-@click.option("--slidemapping", default="config/slide_content_mapping.yaml", help="Slide content mapping file")
-def update_presentation(**kwargs):
-    """
-    sub-command to update a presentation. More details here: https://developers.google.com/slides/api/quickstart/python
-    """
-    configure_logging(logging.INFO)
-    global logger
-    logger = logging.getLogger(__name__)
-    try:
-        creds = authenticate_google_slides(kwargs["credentials"])
-        service = build('slides', 'v1', credentials=creds)
-        slide_info = get_slide_info(service, kwargs["id"], False)
-        logger.info(f"Applying slide mapping: {kwargs["slidemapping"]}")
-        slide_content_mapping = load_config(kwargs["slidemapping"])
-        response = replace_images_and_text(service, kwargs["id"], slide_info, slide_content_mapping)
-        logger.debug(response)
-        logger.info(f"Presentation: {kwargs["id"]} has been updated successfully")
     except Exception as e:
         logger.error(f"Please make sure the provided credentials are correct. Error: {e}")
 
@@ -149,21 +99,6 @@ def process_grafana_config(grafana_data: list, concurrency: int, inference_path:
             all_panels.extend(multi_process(dashboard_chunk, process_dashboard, (g_url, g_username, g_password, concurrency)))
         updated_panels = flatten_list(all_panels)
 
-        if need_deplot:
-            processed_panels = []
-            for i in range(0, len(updated_panels), concurrency):
-                panel_chunk = updated_panels[i: i + concurrency]
-                processed_panels.extend(multi_process(panel_chunk, image_deplot, ("Generate underlying data table of the figure below:")))
-            processed_panels = flatten_list(processed_panels)
-            updated_panels = processed_panels
-        elif need_inference:
-            processed_panels = []
-            for i in range(0, len(updated_panels), concurrency):
-                panel_chunk = updated_panels[i: i + concurrency]
-                processed_panels.extend(multi_process(panel_chunk, image_inference, ("Can you summarize this image?")))
-            processed_panels = flatten_list(processed_panels)
-            updated_panels = processed_panels
-        
         logger.debug("Full list of exported panels")
         logger.debug(updated_panels)
 
@@ -175,16 +110,6 @@ def process_grafana_config(grafana_data: list, concurrency: int, inference_path:
             writer = csv.writer(file)
             writer.writerows(data)
         logger.info(f"Panels summary exported to file: {inference_path}")
-
-        if presentation != "" and slide_mapping != "":
-            logger.info(f"Presentation ID specified. Trying to apply default slide mapping at {slide_mapping}")
-            creds = authenticate_google_slides(credentials)
-            service = build('slides', 'v1', credentials=creds)
-            slide_info = get_slide_info(service, presentation, False)
-            slide_content_mapping = load_config(slide_mapping)
-            response = replace_images_and_text(service, presentation, slide_info, slide_content_mapping)
-            logger.debug(response)
-            logger.info(f"Presentation: {presentation} has been updated successfully")
 
 def process_dashboard(each_dashboard: dict, args: tuple, return_dict: dict, idx: int) -> None:
     """
@@ -224,6 +149,4 @@ if __name__ == "__main__":
         print(len(sys.argv))
         cli.add_command(generate)
         cli.add_command(preview_dashboard)
-        cli.add_command(preview_presentation)
-        cli.add_command(update_presentation)
         cli()
